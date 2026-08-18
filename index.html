@@ -483,7 +483,7 @@
   <div class="admin-box">
     <button class="modal-close" id="closeAdminLogin" style="position:absolute; top:16px; right:16px;">✕</button>
     <h2>Admin Login</h2>
-    <p class="hint">Enter the admin passcode to manage movies. (Demo passcode: <strong>vjfilms2026</strong>)</p>
+    <p class="hint">Enter the admin passcode to manage movies.</p>
     <div class="field">
       <label>Passcode</label>
       <input type="password" id="adminPasscode" placeholder="Enter passcode">
@@ -843,16 +843,22 @@ document.querySelectorAll('[data-nav]').forEach(a=>{
 });
 
 /* ---------- admin login / panel ---------- */
-const ADMIN_PASSCODE = 'vjfilms2026';
+// The passcode is checked as a hash so its plain-text value is not displayed in the page source.
+const ADMIN_PASSCODE_HASH = '37d0eaa7e299cbdf3270d2ed2ff2341302ff1eb8e0e38198d0e9c995ed026d94';
+async function isValidAdminPasscode(value){
+  const bytes = new TextEncoder().encode(value);
+  const hash = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(hash)).map(byte => byte.toString(16).padStart(2,'0')).join('') === ADMIN_PASSCODE_HASH;
+}
 document.getElementById('openAdminLogin').addEventListener('click', ()=>{
   document.getElementById('adminLoginOverlay').classList.add('show');
 });
 document.getElementById('closeAdminLogin').addEventListener('click', ()=>{
   document.getElementById('adminLoginOverlay').classList.remove('show');
 });
-document.getElementById('adminLoginBtn').addEventListener('click', ()=>{
+document.getElementById('adminLoginBtn').addEventListener('click', async ()=>{
   const val = document.getElementById('adminPasscode').value;
-  if(val === ADMIN_PASSCODE){
+  if(await isValidAdminPasscode(val)){
     document.getElementById('adminLoginOverlay').classList.remove('show');
     document.getElementById('adminPanelOverlay').classList.add('show');
     document.getElementById('adminPasscode').value = '';
