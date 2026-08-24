@@ -576,11 +576,82 @@
 
 <script>
 /* =========================================================
-   VJ FILMS — client-side demo data layer (localStorage)
+   VJ FILMS — client-side data layer (IndexedDB)
    ========================================================= */
-const STORAGE_KEY = 'vjfilms_library_v1';
 const SAMPLE_VIDEO = 'https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4';
 const SAMPLE_DOWNLOAD = 'https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4';
+
+/* =========================================================
+   PERSISTENT STORAGE (IndexedDB)
+   Uploaded poster/video/download files are stored as real
+   binary Blobs in IndexedDB, not as blob: URLs. blob: URLs
+   only live for the current page load, so storing those in
+   localStorage (the old approach) meant every upload broke
+   the moment the page reloaded. IndexedDB has no meaningful
+   size cap on video files and survives reloads/tab closes,
+   so this makes "Save" actually save.
+   NOTE: this storage lives in the admin's own browser/device.
+   It will not appear for visitors on other devices — that
+   requires a real server backend.
+   ========================================================= */
+const DB_NAME = 'vjfilms_db';
+const DB_VERSION = 1;
+const STORE_NAME = 'movies';
+
+function openDB(){
+  return new Promise((resolve, reject)=>{
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = ()=>{
+      const db = req.result;
+      if(!db.objectStoreNames.contains(STORE_NAME)){
+        db.createObjectStore(STORE_NAME, {keyPath:'id'});
+      }
+    };
+    req.onsuccess = ()=>resolve(req.result);
+    req.onerror = ()=>reject(req.error);
+  });
+}
+function idbGetAll(db){
+  return new Promise((resolve, reject)=>{
+    const tx = db.transaction(STORE_NAME, 'readonly');
+    const req = tx.objectStore(STORE_NAME).getAll();
+    req.onsuccess = ()=>resolve(req.result || []);
+    req.onerror = ()=>reject(req.error);
+  });
+}
+function idbPut(db, record){
+  return new Promise((resolve, reject)=>{
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    tx.objectStore(STORE_NAME).put(record);
+    tx.oncomplete = ()=>resolve();
+    tx.onerror = ()=>reject(tx.error);
+  });
+}
+function idbDelete(db, id){
+  return new Promise((resolve, reject)=>{
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    tx.objectStore(STORE_NAME).delete(id);
+    tx.oncomplete = ()=>resolve();
+    tx.onerror = ()=>reject(tx.error);
+  });
+}
+
+let dbPromise = openDB();
+
+/* Turn a stored record (which may hold real Blobs) into the
+   {poster, video, download} string URLs the rest of the app
+   already knows how to render. Object URLs are created fresh
+   from the Blob every time the app loads, so they're always
+   valid for the current page load. */
+function hydrateRecord(r){
+  const posterURL = r.posterBlob ? URL.createObjectURL(r.posterBlob) : r.posterURL;
+  const videoURL = r.videoBlob ? URL.createObjectURL(r.videoBlob) : r.videoURL;
+  const downloadURL = r.downloadBlob ? URL.createObjectURL(r.downloadBlob) : (r.downloadURL || videoURL);
+  return {
+    id:r.id, title:r.title, genre:r.genre, vj:r.vj, desc:r.desc, added:r.added,
+    poster:posterURL, video:videoURL, download:downloadURL
+  };
+}
 
 function samplePoster(seed, tone){
   // Generates a simple placeholder poster (SVG data URL) so the demo has visuals without external images.
@@ -630,18 +701,37 @@ function seedData(){
   return arr;
 }
 
-function loadLibrary(){
-  const raw = localStorage.getItem(STORAGE_KEY);
-  if(raw){
-    try{ return JSON.parse(raw); }catch(e){ /* fallthrough */ }
-  }
-  const seeded = seedData();
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(seeded));
-  return seeded;
+/* seedData() above returns plain {video, download, poster} string URLs —
+   wrap them as records with *URL fields (no Blobs) for IndexedDB storage. */
+function seedRecords(){
+  return seedData().map(m=>({
+    id:m.id, title:m.title, genre:m.genre, vj:m.vj, desc:m.desc, added:m.added,
+    posterURL:m.poster, videoURL:m.video, downloadURL:m.download,
+    posterBlob:null, videoBlob:null, downloadBlob:null
+  }));
 }
-function saveLibrary(lib){ localStorage.setItem(STORAGE_KEY, JSON.stringify(lib)); }
 
-let library = loadLibrary();
+async function loadLibrary(){
+  const db = await dbPromise;
+  let records = await idbGetAll(db);
+  if(records.length === 0){
+    records = seedRecords();
+    for(const r of records){ await idbPut(db, r); }
+  }
+  records.sort((a,b)=>b.added-a.added);
+  return records.map(hydrateRecord);
+}
+
+async function addMovieRecord(record){
+  const db = await dbPromise;
+  await idbPut(db, record);
+}
+async function deleteMovieRecord(id){
+  const db = await dbPromise;
+  await idbDelete(db, id);
+}
+
+let library = [];
 let state = { genre:'All', vj:null, query:'' };
 
 /* ---------- helpers ---------- */
@@ -788,6 +878,7 @@ function openMovieModal(id){
   }
   const dlBtn = document.getElementById('modalDownloadBtn');
   dlBtn.href = m.download || '#';
+  dlBtn.download = m.download ? `${m.title.replace(/[^a-z0-9]+/gi,'_')}.mp4` : '';
 
   document.getElementById('modalWatchBtn').onclick = ()=>{
     const v = media.querySelector('video');
@@ -916,29 +1007,56 @@ function resetDropZones(){
   });
 }
 
-document.getElementById('addMovieForm').addEventListener('submit', (e)=>{
+document.getElementById('addMovieForm').addEventListener('submit', async (e)=>{
   e.preventDefault();
   const title = document.getElementById('f_title').value.trim();
   const genre = document.getElementById('f_genre').value;
   const vj = document.getElementById('f_vj').value.trim();
-  const poster = droppedFiles.poster ? URL.createObjectURL(droppedFiles.poster) : samplePoster(title, genre);
-  const video = droppedFiles.video ? URL.createObjectURL(droppedFiles.video) : '';
-  const download = droppedFiles.download ? URL.createObjectURL(droppedFiles.download) : video;
   const desc = document.getElementById('f_desc').value.trim() || `${title} — translated by ${vj}.`;
 
   if(!title || !genre || !vj){ showToast('Please fill all required fields'); return; }
-  if(!video){ showToast('Drop a video file before adding the movie'); return; }
+  if(!droppedFiles.video){ showToast('Drop a video file before adding the movie'); return; }
 
-  library.unshift({
+  const BIG_FILE_WARN = 300 * 1024 * 1024; // 300MB
+  const totalSize = (droppedFiles.video?.size||0) + (droppedFiles.download?.size||0) + (droppedFiles.poster?.size||0);
+  if(totalSize > BIG_FILE_WARN){
+    showToast('Saving a large video — this may take a moment...');
+  }
+
+  const submitBtn = e.target.querySelector('button[type="submit"]');
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'Saving...';
+
+  const record = {
     id:'m_'+Date.now(),
-    title, genre, vj, poster, video, download, desc, added:Date.now()
-  });
-  saveLibrary(library);
-  e.target.reset();
-  resetDropZones();
-  showToast('Movie added to library');
-  renderAll();
-  renderManageList();
+    title, genre, vj, desc, added:Date.now(),
+    posterBlob: droppedFiles.poster || null,
+    posterURL: droppedFiles.poster ? null : samplePoster(title, genre),
+    videoBlob: droppedFiles.video || null,
+    videoURL: null,
+    downloadBlob: droppedFiles.download || null,
+    downloadURL: null
+  };
+
+  try{
+    await addMovieRecord(record);
+    library.unshift(hydrateRecord(record));
+    e.target.reset();
+    resetDropZones();
+    showToast('Movie saved — will still be here after a reload');
+    renderAll();
+    renderManageList();
+  }catch(err){
+    console.error(err);
+    if(err && err.name === 'QuotaExceededError'){
+      showToast('Not enough browser storage space for this file');
+    } else {
+      showToast('Could not save — try a smaller file or free up space');
+    }
+  }finally{
+    submitBtn.disabled = false;
+    submitBtn.textContent = '+ Add Movie';
+  }
 });
 
 function renderManageList(){
@@ -956,19 +1074,32 @@ function renderManageList(){
       </div>
       <button data-id="${m.id}">Remove</button>
     `;
-    row.querySelector('button').addEventListener('click', ()=>{
-      library = library.filter(x=>x.id !== m.id);
-      saveLibrary(library);
-      renderManageList();
-      renderAll();
-      showToast('Movie removed');
+    row.querySelector('button').addEventListener('click', async ()=>{
+      try{
+        await deleteMovieRecord(m.id);
+        library = library.filter(x=>x.id !== m.id);
+        renderManageList();
+        renderAll();
+        showToast('Movie removed');
+      }catch(err){
+        console.error(err);
+        showToast('Could not remove movie — try again');
+      }
     });
     list.appendChild(row);
   });
 }
 
 /* ---------- init ---------- */
-renderAll();
+(async function init(){
+  try{
+    library = await loadLibrary();
+  }catch(err){
+    console.error('Failed to open local database, falling back to session-only data', err);
+    library = seedData();
+  }
+  renderAll();
+})();
 </script>
 
 </body>
