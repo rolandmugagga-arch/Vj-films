@@ -359,6 +359,12 @@
     font-size:0.7rem; font-weight:700; padding:6px 10px; border-radius:6px;
   }
   .manage-row button:hover{background:rgba(194,45,45,0.15);}
+  .history-list{max-height:280px; overflow-y:auto; display:flex; flex-direction:column; gap:8px; margin-top:18px;}
+  .history-row{display:flex; align-items:center; justify-content:space-between; gap:12px; background:var(--bg-panel-2); border:1px solid var(--line); border-radius:8px; padding:10px 12px; font-size:0.78rem;}
+  .history-row .history-title{font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+  .history-row .history-meta{color:var(--muted); font-size:0.7rem; text-align:right; flex-shrink:0;}
+  .history-row.added .history-action{color:#4bbd7a;}
+  .history-row.removed .history-action{color:#ff8a8a;}
 
   .toast{
     position:fixed; bottom:26px; left:50%; transform:translateX(-50%) translateY(20px);
@@ -566,6 +572,8 @@
         <div class="admin-card">
           <h3>Current Library (<span id="libCount">0</span>)</h3>
           <div class="manage-list" id="manageList"></div>
+          <h3 style="margin-top:28px;">Activity History</h3>
+          <div class="history-list" id="historyList"></div>
         </div>
       </div>
     </div>
@@ -595,8 +603,9 @@ const SAMPLE_DOWNLOAD = 'https://interactive-examples.mdn.mozilla.net/media/cc0-
    requires a real server backend.
    ========================================================= */
 const DB_NAME = 'vjfilms_db';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_NAME = 'movies';
+const HISTORY_STORE_NAME = 'history';
 
 function openDB(){
   return new Promise((resolve, reject)=>{
@@ -605,6 +614,9 @@ function openDB(){
       const db = req.result;
       if(!db.objectStoreNames.contains(STORE_NAME)){
         db.createObjectStore(STORE_NAME, {keyPath:'id'});
+      }
+      if(!db.objectStoreNames.contains(HISTORY_STORE_NAME)){
+        db.createObjectStore(HISTORY_STORE_NAME, {keyPath:'id'});
       }
     };
     req.onsuccess = ()=>resolve(req.result);
@@ -631,6 +643,22 @@ function idbDelete(db, id){
   return new Promise((resolve, reject)=>{
     const tx = db.transaction(STORE_NAME, 'readwrite');
     tx.objectStore(STORE_NAME).delete(id);
+    tx.oncomplete = ()=>resolve();
+    tx.onerror = ()=>reject(tx.error);
+  });
+}
+function idbGetAllHistory(db){
+  return new Promise((resolve, reject)=>{
+    const tx = db.transaction(HISTORY_STORE_NAME, 'readonly');
+    const req = tx.objectStore(HISTORY_STORE_NAME).getAll();
+    req.onsuccess = ()=>resolve(req.result || []);
+    req.onerror = ()=>reject(req.error);
+  });
+}
+function idbAddHistory(db, entry){
+  return new Promise((resolve, reject)=>{
+    const tx = db.transaction(HISTORY_STORE_NAME, 'readwrite');
+    tx.objectStore(HISTORY_STORE_NAME).put(entry);
     tx.oncomplete = ()=>resolve();
     tx.onerror = ()=>reject(tx.error);
   });
@@ -725,13 +753,35 @@ async function loadLibrary(){
 async function addMovieRecord(record){
   const db = await dbPromise;
   await idbPut(db, record);
+  const entry = {
+    id:`history_${record.id}`,
+    movieId:record.id,
+    title:record.title,
+    action:'Added',
+    timestamp:record.added
+  };
+  await idbAddHistory(db, entry);
+  history.unshift(entry);
 }
 async function deleteMovieRecord(id){
   const db = await dbPromise;
   await idbDelete(db, id);
+  const movie = library.find(item=>item.id===id);
+  if(movie){
+    const entry = {
+      id:`history_removed_${id}_${Date.now()}`,
+      movieId:id,
+      title:movie.title,
+      action:'Removed',
+      timestamp:Date.now()
+    };
+    await idbAddHistory(db, entry);
+    history.unshift(entry);
+  }
 }
 
 let library = [];
+let history = [];
 let state = { genre:'All', vj:null, query:'' };
 
 /* ---------- helpers ---------- */
@@ -1046,6 +1096,7 @@ document.getElementById('addMovieForm').addEventListener('submit', async (e)=>{
     showToast('Movie saved — will still be here after a reload');
     renderAll();
     renderManageList();
+    renderHistoryList();
   }catch(err){
     console.error(err);
     if(err && err.name === 'QuotaExceededError'){
@@ -1079,6 +1130,7 @@ function renderManageList(){
         await deleteMovieRecord(m.id);
         library = library.filter(x=>x.id !== m.id);
         renderManageList();
+        renderHistoryList();
         renderAll();
         showToast('Movie removed');
       }catch(err){
@@ -1089,16 +1141,39 @@ function renderManageList(){
     list.appendChild(row);
   });
 }
+function renderHistoryList(){
+  const list = document.getElementById('historyList');
+  list.innerHTML = '';
+  if(history.length === 0){
+    list.innerHTML = '<div class="empty-state">No activity recorded yet.</div>';
+    return;
+  }
+  history.slice(0,100).forEach(entry=>{
+    const row = document.createElement('div');
+    row.className = `history-row ${entry.action.toLowerCase()}`;
+    const title = document.createElement('span');
+    title.className = 'history-title';
+    title.textContent = entry.title;
+    const meta = document.createElement('span');
+    meta.className = 'history-meta';
+    meta.innerHTML = `<span class="history-action">${entry.action}</span><br>${new Date(entry.timestamp).toLocaleString()}`;
+    row.append(title, meta);
+    list.appendChild(row);
+  });
+}
 
 /* ---------- init ---------- */
 (async function init(){
   try{
     library = await loadLibrary();
+    history = (await idbGetAllHistory(await dbPromise)).sort((a,b)=>b.timestamp-a.timestamp);
   }catch(err){
     console.error('Failed to open local database, falling back to session-only data', err);
     library = seedData();
   }
   renderAll();
+  renderManageList();
+  renderHistoryList();
 })();
 </script>
 
